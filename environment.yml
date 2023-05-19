@@ -1,0 +1,19 @@
+name: mvnormal_kde_example
+channels:
+  - conda-forge
+  - defaults
+dependencies:
+  - python=3
+  - pymc=5
+  - matplotlib
+  - jupyterlab
+  - seaborn
+  - numpy
+  - scipy
+  - tqdm
+  - ca-certificates
+  - certifi
+  - openssl
+  - ipywidgets
+  - numpyro
+  - jax
