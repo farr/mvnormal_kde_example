@@ -75,6 +75,17 @@ def marginal_normal_model(log_p_other, samples, prior_wts, n_normal, *args, samp
     vector of these parameters inferred after marginalizing out the Gaussian
     dimensions.
 
+    If the optional arguments `samples_sel`, `pdraw_sel`, and `n_draw_sel` are
+    given, then the model corrects for selection effects, assuming that
+    `samples_sel` are samples of the parameters drawn according to the
+    (normalized) density `pdraw_sel` that have been passed through an
+    observational model and selected according to the same pipeline / selection
+    function that produced the catalog under analysis.  `n_draw_sel` records how
+    many total draws from the population were required to produce the
+    `samples_sel` using the selection function.  See [Farr
+    (2019)](https://ui.adsabs.harvard.edu/abs/2019RNAAS...3...66F/abstract) for
+    details and formulae.
+
     Setting the optional argument `predictive=True` will produce samples of
     "generated quantities" based on a previous sampling of the latent parameters
     in the model.  The quantities generated and their names are:
@@ -84,6 +95,10 @@ def marginal_normal_model(log_p_other, samples, prior_wts, n_normal, *args, samp
       components are the Gaussian-population dimensions.  
     * `theta_gaussian_draw`: A single draw from the Gaussian population for the
       Gaussian population dimensions.
+    * `R`: if `samples_sel` are given, then this is a draw from the "rate"
+      (normalizing factor) given the population model; see [Farr
+      (2019)](https://ui.adsabs.harvard.edu/abs/2019RNAAS...3...66F/abstract)
+      for details.
 
     To produce such draws using a MCMC chain, use code like 
 
@@ -92,22 +107,19 @@ def marginal_normal_model(log_p_other, samples, prior_wts, n_normal, *args, samp
         from numpyro.infer import MCMC, Predictive
 
         # Set up your model, which includes marginal_normal_model as a sub-model
-        # Your model should pass the `predictive` kwarg along to
-        # `marginal_normal_model` when it calls it.
-        def full_model_function(arg1, arg2, ..., predictive=False, ...):
-            ...
-            marginal_normal_model(..., predictive=predictive)
-            ...
+        # Your model should pass the `predictive` kwarg along to #
+        `marginal_normal_model` when it calls it. def full_model_function(arg1,
+        arg2, ..., predictive=False, ...):
+            ... marginal_normal_model(..., predictive=predictive) ...
             
-        # Initialize and run an MCMC 
-        mcmc = MCMC(...) 
-        mcmc.run
+        # Initialize and run an MCMC mcmc = MCMC(...) mcmc.run
 
-        predictive = Predictive(full_model_function, mcmc.get_samples())
-        pred = predictive(jax.random.PRNGKey(42), full_model_argument_1, full_model_argument_2, ..., predictive=True)
+        predictive = Predictive(full_model_function, mcmc.get_samples()) pred =
+        predictive(jax.random.PRNGKey(42), full_model_argument_1,
+        full_model_argument_2, ..., predictive=True)
 
-        # You can now access generated draws from the posterior over, e.g., `theta` via
-        pred['theta'] # shape is (nmcmc_draws, nobs, ndim)
+        # You can now access generated draws from the posterior over, e.g.,
+        `theta` via pred['theta'] # shape is (nmcmc_draws, nobs, ndim)
 
     :param log_p_other: Function implementing the non-Gaussian part of the
         population model.  Called with parameters `theta[n_normal:]` inferred
@@ -134,6 +146,21 @@ def marginal_normal_model(log_p_other, samples, prior_wts, n_normal, *args, samp
 
     :param predictive: (default `False`).  Whether to produce samples over the
         "generated quantities" as described above.
+
+    :param samples_sel: (default `None`).  If provided an array of shape `(nsel,
+        ndim)` of true parameters of systems that have been drawn from the
+        normalized density `pdraw_sel`, injected into noise realizations, and
+        detected by the same pipeline / selection function that produced the
+        catalog under analysis.
+
+    :param pdraw_sel: (default `None`).  If provided, array of shape `(nsel,)`
+        giving the (normalized) density from which the detected `samples_sel`
+        were drawn before being passed through the pipeline / selection
+        function.
+
+    :param n_draw_sel: (default `None`).  If provided, the total number of draws
+        from the density represented by `pdraw_sel` which produced the detected
+        samples `samples_sel`.
     """
     samples = np.atleast_3d(samples)
     prior_wts = np.atleast_2d(prior_wts)
