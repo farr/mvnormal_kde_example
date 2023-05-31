@@ -51,7 +51,7 @@ def gaussian_marginalization(samples, kde_bws, mu, sigmas):
 
     return a, A, B
 
-def marginal_normal_model(log_p_other, samples, prior_wts, n_normal, *args, predictive=False, **kwargs):
+def marginal_normal_model(log_p_other, samples, prior_wts, n_normal, *args, samples_sel=None, pdraw_sel=None, n_draw_sel=None, predictive=False, **kwargs):
     r"""
     Model that marginalizes out Gaussian populations in some dimensions using a
     KDE approximation to the likelihood function.
@@ -163,6 +163,26 @@ def marginal_normal_model(log_p_other, samples, prior_wts, n_normal, *args, pred
 
     numpyro.factor('likelihood', jnp.sum(logp_sum))
 
+    if samples_sel is not None:
+        nsel, _ = samples_sel.shape
+        cov_sel = np.cov(samples_sel, rowvar=False)
+        ccov_sel = np.linalg.inv(np.linalg.inv(cov_sel)[:n_normal, :n_normal])
+        bw_sel = ccov_sel / nsel**(2/(4+n_normal))
+
+        B_sel = bw_sel + jnp.diag(jnp.square(sigmas))
+
+        logp_normal_sel = dist.MultivariateNormal(mu, B_sel).log_prob(samples_sel[:, :n_normal])
+        logp_other_sel = log_p_other(samples_sel[:, n_normal:])
+
+        logp_total_sel = logp_normal_sel + logp_other_sel - jnp.log(pdraw_sel)
+
+        log_mu_sel = jss.logsumexp(logp_total_sel) - jnp.log(n_draw_sel)
+        log_m2_sel = jss.logsumexp(2*logp_total_sel) - 2*jnp.log(n_draw_sel)
+        log_s2_sel = log_m2_sel + jnp.log1p(-jnp.exp(2*log_mu_sel - jnp.log(n_draw_sel) - log_m2_sel))
+        neff_sel = numpyro.deterministic('neff_sel', jnp.exp(2*log_mu_sel - log_s2_sel))
+
+        _ = numpyro.factor('selection_norm', -nobs*log_mu_sel)
+
     if predictive:
         inds = numpyro.sample('inds', dist.CategoricalLogits(logp_total))
         a_i = a[jnp.arange(nobs), inds, :]
@@ -170,3 +190,7 @@ def marginal_normal_model(log_p_other, samples, prior_wts, n_normal, *args, pred
         theta = numpyro.sample('theta', dist.MultivariateNormal(a_i, A_i))
 
         theta_gaussian_draw = numpyro.sample('theta_gaussian_draw', dist.Normal(mu, sigmas))
+
+        if samples_sel is not None:
+            mu = jnp.exp(log_mu_sel)
+            R = numpyro.sample('R', dist.Normal(nobs/mu, np.sqrt(nobs)/mu))
