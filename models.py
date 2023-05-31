@@ -5,6 +5,52 @@ import numpy as np
 import numpyro
 import numpyro.distributions as dist
 
+def gaussian_marginalization(samples, kde_bws, mu, sigmas):
+    n_normal = mu.shape[0]
+    nobs, nsamp, ndim = samples.shape
+
+    assert kde_bws.shape == (nobs, ndim, ndim)
+
+    mu_full = jnp.concatenate((mu, jnp.zeros(ndim-n_normal)))
+
+    eye_full = jnp.eye(ndim)
+    upper = eye_full[:, :n_normal]
+    lower = eye_full[:, n_normal:]
+
+    # We only need the upper (n_normal, n_normal) corner of Lambda to be non-zero
+    Lambda = upper @ jnp.diag(jnp.square(sigmas)) @ upper.T 
+    # Lambda_upper = Lambda_upper + lower @ jnp.eye(ndim-n_normal) @ lower.T
+
+    T_axes = (0, 2, 1)
+    kb_T = jnp.transpose(kde_bws, axes=T_axes)
+
+    Q = eye_full + jnp.transpose(jnp.linalg.solve(kb_T, Lambda[jnp.newaxis, ...]), axes=T_axes)
+
+    mue = mu_full[:, jnp.newaxis]
+
+    U = lower
+    VT = jnp.transpose(jnp.linalg.solve(kb_T, lower[jnp.newaxis, ...]), T_axes)
+    VTQIU = VT @ jnp.linalg.solve(Q, U[jnp.newaxis, ...])
+    QI_mu = jnp.linalg.solve(Q, mue[jnp.newaxis, ...])
+
+    mu_term = (QI_mu - U @ jnp.linalg.solve(VTQIU, VT @ QI_mu))[...,0]
+
+
+
+    es = samples[..., jnp.newaxis]
+    kb = kde_bws[..., jnp.newaxis, :, :]
+    U = upper
+    UTe = U.T[jnp.newaxis, jnp.newaxis, :, :]
+
+    samples_term = (es - kb @ U @ jnp.linalg.solve(jnp.diag(jnp.square(sigmas)) + U.T @ kb @ U, U.T @ es))[..., 0]
+
+    a = mu_term[..., jnp.newaxis, :] + samples_term
+    A = kb - kb @ U @ jnp.linalg.solve(jnp.diag(jnp.square(sigmas)) + U.T @ kb @ U, UTe) @ kb
+
+    B = kde_bws[..., :n_normal, :n_normal] + jnp.diag(jnp.square(sigmas))
+
+    return a, A, B
+
 def marginal_normal_model(log_p_other, samples, prior_wts, n_normal, *args, predictive=False, **kwargs):
     r"""
     Model that marginalizes out Gaussian populations in some dimensions using a
@@ -62,8 +108,7 @@ def marginal_normal_model(log_p_other, samples, prior_wts, n_normal, *args, pred
 
         # You can now access generated draws from the posterior over, e.g., `theta` via
         pred['theta'] # shape is (nmcmc_draws, nobs, ndim)
-    """
-    """
+
     :param log_p_other: Function implementing the non-Gaussian part of the
         population model.  Called with parameters `theta[n_normal:]` inferred
         after marginalizing out the Gaussian part of the population.  Should
@@ -103,44 +148,10 @@ def marginal_normal_model(log_p_other, samples, prior_wts, n_normal, *args, pred
 
     kde_bw = sigma / nsamp**(2/(4+ndim))
 
-    max_bw = np.max(kde_bw, axis=0)
-    max_bw = np.max(np.diag(max_bw)[n_normal:])
-
     mu = numpyro.sample('mu', dist.Normal(0,1), sample_shape=(n_normal,))
     sigmas = numpyro.sample('sigma', dist.HalfNormal(1), sample_shape=(n_normal,))
 
-    mu_full = jnp.concatenate((mu, jnp.zeros(ndim-n_normal)))
-
-    eye_full = jnp.eye(ndim)
-    upper = eye_full[:, :n_normal]
-    lower = eye_full[:, n_normal:]
-
-    # We only need the upper (n_normal, n_normal) corner of Lambda to be non-zero
-    Lambda = upper @ jnp.diag(jnp.square(sigmas)) @ upper.T 
-    # Lambda_upper = Lambda_upper + lower @ jnp.eye(ndim-n_normal) @ lower.T
-
-    T_axes = (0, 2, 1)
-    kb_T = jnp.transpose(kde_bw, axes=T_axes)
-
-    Q = eye_full + jnp.transpose(jnp.linalg.solve(kb_T, Lambda[jnp.newaxis, ...]), axes=T_axes)
-
-    mue = mu_full[:, jnp.newaxis]
-
-    U = lower
-    VT = jnp.transpose(jnp.linalg.solve(kb_T, lower[jnp.newaxis, ...]), T_axes)
-    VTQIU = VT @ jnp.linalg.solve(Q, U[jnp.newaxis, ...])
-    QI_mu = jnp.linalg.solve(Q, mue[jnp.newaxis, ...])
-
-    mu_term = (QI_mu - U @ jnp.linalg.solve(VTQIU, VT @ QI_mu))[...,0]
-
-    es = samples[..., jnp.newaxis]
-    kb = kde_bw[..., jnp.newaxis, :, :]
-    U = upper
-    samples_term = (es - kb @ U @ jnp.linalg.solve(jnp.diag(jnp.square(sigmas)) + U.T @ kb @ U, U.T @ es))[..., 0]
-
-    a = mu_term[..., jnp.newaxis, :] + samples_term
-
-    B = kde_bw[..., :n_normal, :n_normal] + jnp.diag(jnp.square(sigmas))
+    a, A, B = gaussian_marginalization(samples, kde_bw, mu, sigmas)
 
     logp_normal = dist.MultivariateNormal(mu, B[..., jnp.newaxis, :, :]).log_prob(samples[..., :n_normal])
     logp_other_0 = log_p_other(a[..., n_normal:])
@@ -154,12 +165,8 @@ def marginal_normal_model(log_p_other, samples, prior_wts, n_normal, *args, pred
 
     if predictive:
         inds = numpyro.sample('inds', dist.CategoricalLogits(logp_total))
-        kb = jnp.array(kb)
-        kb_i = kb[jnp.arange(nobs), inds, :, :]
-        UTe = jnp.expand_dims(U.T, axis=0)
-
-        A = kb_i - kb_i @ U @ jnp.linalg.solve(jnp.diag(jnp.square(sigmas)) + U.T @ kb_i @ U, UTe) @ kb_i
         a_i = a[jnp.arange(nobs), inds, :]
-        theta = numpyro.sample('theta', dist.MultivariateNormal(a_i, A))
+        A_i = A[jnp.arange(nobs), inds, :, :]
+        theta = numpyro.sample('theta', dist.MultivariateNormal(a_i, A_i))
 
-        theta_gaussian_draw = numpyro.sample('theta_gaussian_draw', dist.MultivariateNormal(mu, Lambda[:n_normal, :n_normal]))
+        theta_gaussian_draw = numpyro.sample('theta_gaussian_draw', dist.Normal(mu, sigmas))
